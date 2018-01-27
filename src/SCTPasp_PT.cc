@@ -1494,6 +1494,7 @@ void SCTPasp__PT_PROVIDER::create_socket()
   struct sockaddr_in  sin;
   int enable = 1;
 
+  usleep(200000);
   log("Creating SCTP socket.");
   if ((fd = socket(AF_INET, SOCK_STREAM, IPPROTO_SCTP)) == -1)
     error("Socket error: cannot create socket!");
