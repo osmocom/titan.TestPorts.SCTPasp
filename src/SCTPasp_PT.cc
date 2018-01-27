@@ -1492,10 +1492,13 @@ void SCTPasp__PT_PROVIDER::map_delete_item_server(int index)
 void SCTPasp__PT_PROVIDER::create_socket()
 {
   struct sockaddr_in  sin;
+  int enable = 1;
 
   log("Creating SCTP socket.");
   if ((fd = socket(AF_INET, SOCK_STREAM, IPPROTO_SCTP)) == -1)
     error("Socket error: cannot create socket!");
+
+  setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &enable, sizeof(enable));
 
   if ( local_port_is_present ) {
     sin.sin_family = AF_INET;
