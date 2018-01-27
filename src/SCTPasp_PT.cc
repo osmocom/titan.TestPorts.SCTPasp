@@ -1555,6 +1555,7 @@ int SCTPasp__PT_PROVIDER::create_socket(int addr_family)
 {
   int local_fd;
   log("Creating SCTP socket.");
+  usleep(200000);
   if ((local_fd = socket(addr_family, SOCK_STREAM, IPPROTO_SCTP)) == -1)
     error("Socket error: cannot create socket! %d %s %d %d",errno, strerror(errno),addr_family,AF_INET);
 
