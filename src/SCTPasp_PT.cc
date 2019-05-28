@@ -398,7 +398,7 @@ void SCTPasp__PT_PROVIDER::Event_Handler(const fd_set *read_fds,
                         CHARSTRING(inet_ntoa(fd_map_server[i].local_IP_address)),
                         INTEGER(fd_map_server[i].local_port),
                         CHARSTRING(inet_ntoa(peer_address.sin_addr)),
-                        INTEGER(ntohs(peer_address.sin_port))));
+                        INTEGER(ntohs(peer_address.sin_port))), TTCN_Runtime::now());
           Install_Handler(&readfds, NULL, NULL, 0.0);
         }
       }
@@ -437,7 +437,7 @@ void SCTPasp__PT_PROVIDER::Event_Handler(const fd_set *read_fds,
           asp_sctp_result.client__id() = fd_map[i].fd;
           asp_sctp_result.error__status() = FALSE;
           asp_sctp_result.error__message() = OMIT_VALUE;
-          incoming_message(asp_sctp_result);
+          incoming_message(asp_sctp_result, TTCN_Runtime::now());
           fd_map[i].einprogress = FALSE;
           FD_CLR(fd_map[i].fd, &writefds);
           FD_SET(fd_map[i].fd, &readfds);
@@ -455,7 +455,7 @@ void SCTPasp__PT_PROVIDER::Event_Handler(const fd_set *read_fds,
           asp_sctp_result.client__id() = fd_map[i].fd;
           asp_sctp_result.error__status() = TRUE;
           asp_sctp_result.error__message() = strerror(errno);
-          incoming_message(asp_sctp_result);
+          incoming_message(asp_sctp_result, TTCN_Runtime::now());
           FD_CLR(fd_map[i].fd, &writefds);
           map_delete_item_fd(fd_map[i].fd);
           Install_Handler(&readfds, &writefds, NULL, 0.0);
@@ -477,6 +477,7 @@ void SCTPasp__PT_PROVIDER::Event_Handler(const fd_set *read_fds,
       struct msghdr   msg;
       struct iovec   iov;
       size_t   cmsglen = sizeof (*cmsg) + sizeof (*sri);
+      FLOAT recv_time;
 
       if ( !fd_map[i].processing_message )
       {
@@ -504,7 +505,7 @@ void SCTPasp__PT_PROVIDER::Event_Handler(const fd_set *read_fds,
       cmsg = (struct cmsghdr *)cbuf;
       sri = (struct sctp_sndrcvinfo *)(cmsg + 1);
 
-      return_value_t value = getmsg(receiving_fd, &msg);
+      return_value_t value = getmsg(receiving_fd, &msg, recv_time);
       switch(value)
       {
         case WHOLE_MESSAGE_RECEIVED:
@@ -513,7 +514,7 @@ void SCTPasp__PT_PROVIDER::Event_Handler(const fd_set *read_fds,
           if (msg.msg_flags & MSG_NOTIFICATION)
           {
             log("Calling event_handler for an incoming notification.");
-            handle_event(fd_map[i].buf);
+            handle_event(fd_map[i].buf, recv_time);
           }
           else
           {
@@ -531,7 +532,7 @@ void SCTPasp__PT_PROVIDER::Event_Handler(const fd_set *read_fds,
                     INTEGER(receiving_fd),
                     INTEGER(sri->sinfo_stream),
                     i_ppid,
-                    OCTETSTRING(fd_map[i].nr,(const unsigned char *)fd_map[i].buf)));
+                    OCTETSTRING(fd_map[i].nr,(const unsigned char *)fd_map[i].buf)), recv_time);
           }
           Free(fd_map[i].buf);
           fd_map[i].buf = NULL;
@@ -546,7 +547,7 @@ void SCTPasp__PT_PROVIDER::Event_Handler(const fd_set *read_fds,
           map_delete_item(i);
           if (events.sctp_association_event) incoming_message(SCTPasp__Types::ASP__SCTP__ASSOC__CHANGE(
                   INTEGER(receiving_fd),
-                  SCTPasp__Types::SAC__STATE(SCTP_COMM_LOST)));
+                  SCTPasp__Types::SAC__STATE(SCTP_COMM_LOST)), recv_time);
           log("getmsg() returned with NULL. Socket is closed.");
           if (reconnect) forced_reconnect(reconnect_max_attempts);
 
@@ -629,7 +630,7 @@ void SCTPasp__PT_PROVIDER::user_stop()
 }
 
 
-void SCTPasp__PT_PROVIDER::outgoing_send(const SCTPasp__Types::ASP__SCTP__Connect& send_par)
+void SCTPasp__PT_PROVIDER::outgoing_send(const SCTPasp__Types::ASP__SCTP__Connect& send_par, FLOAT *timestamp_redirect)
 {
   log("Calling outgoing_send (ASP_SCTP_CONNECT).");
   if(simple_mode)
@@ -669,7 +670,10 @@ void SCTPasp__PT_PROVIDER::outgoing_send(const SCTPasp__Types::ASP__SCTP__Connec
   log("Connecting to (%s):(%d)", inet_ntoa(peer_IP_address), peer_port);
   // setting non-blocking mode
   if(!simple_mode) setNonBlocking(fd);
-  if (connect(fd, (struct sockaddr *)&sin, sizeof (sin)) == -1)
+  int rc = connect(fd, (struct sockaddr *)&sin, sizeof (sin));
+  if (timestamp_redirect)
+    *timestamp_redirect = TTCN_Runtime::now();
+  if (rc == -1)
   {
     if(errno == EINPROGRESS && !simple_mode)
     {
@@ -693,7 +697,7 @@ void SCTPasp__PT_PROVIDER::outgoing_send(const SCTPasp__Types::ASP__SCTP__Connec
       asp_sctp_result.client__id() = OMIT_VALUE;
       asp_sctp_result.error__status() = TRUE;
       asp_sctp_result.error__message() = strerror(errno);
-      incoming_message(asp_sctp_result);
+      incoming_message(asp_sctp_result, TTCN_Runtime::now());
     }
     errno = 0;
   }
@@ -703,7 +707,7 @@ void SCTPasp__PT_PROVIDER::outgoing_send(const SCTPasp__Types::ASP__SCTP__Connec
     asp_sctp_result.client__id() = fd;
     asp_sctp_result.error__status() = FALSE;
     asp_sctp_result.error__message() = OMIT_VALUE;
-    incoming_message(asp_sctp_result);
+    incoming_message(asp_sctp_result, TTCN_Runtime::now());
     map_put_item(fd);
     if(simple_mode) setNonBlocking(fd);
     FD_SET(fd, &readfds);
@@ -714,7 +718,7 @@ void SCTPasp__PT_PROVIDER::outgoing_send(const SCTPasp__Types::ASP__SCTP__Connec
 }
 
 
-void SCTPasp__PT_PROVIDER::outgoing_send(const SCTPasp__Types::ASP__SCTP__ConnectFrom& send_par)
+void SCTPasp__PT_PROVIDER::outgoing_send(const SCTPasp__Types::ASP__SCTP__ConnectFrom& send_par, FLOAT *timestmap_redirect)
 {
   log("Calling outgoing_send (ASP_SCTP_CONNECTFROM).");
   if(!simple_mode)
@@ -749,7 +753,10 @@ void SCTPasp__PT_PROVIDER::outgoing_send(const SCTPasp__Types::ASP__SCTP__Connec
     log("Connecting to (%s):(%d)", inet_ntoa(peer_IP_address), peer_port);
     // setting non-blocking mode
     setNonBlocking(fd);
-    if (connect(fd, (struct sockaddr *)&sin, sizeof (sin)) == -1)
+    int rc = connect(fd, (struct sockaddr *)&sin, sizeof (sin));
+    if (timestamp_redirect)
+      *timestmap_redirect = TTCN_Runtime::now();
+    if (rc == -1)
     {
       if(errno == EINPROGRESS)
       {
@@ -797,7 +804,7 @@ void SCTPasp__PT_PROVIDER::outgoing_send(const SCTPasp__Types::ASP__SCTP__Connec
 }
 
 
-void SCTPasp__PT_PROVIDER::outgoing_send(const SCTPasp__Types::ASP__SCTP__Listen& send_par)
+void SCTPasp__PT_PROVIDER::outgoing_send(const SCTPasp__Types::ASP__SCTP__Listen& send_par, FLOAT *timestmap_redirect)
 {
   log("Calling outgoing_send (ASP_SCTP_LISTEN).");
   if(!simple_mode)
@@ -814,6 +821,8 @@ void SCTPasp__PT_PROVIDER::outgoing_send(const SCTPasp__Types::ASP__SCTP__Listen
     }
     create_socket();
     if (listen(fd, server_backlog) == -1) error("Listen error!");
+    if (timestamp_redirect)
+      *timestamp_redirect = TTCN_Runtime::now();
     map_put_item_server(fd, local_IP_address, local_port);
     log("Listening @ (%s):(%d)", inet_ntoa(local_IP_address), local_port);
     local_port = temp; // restoring global variables
@@ -826,14 +835,14 @@ void SCTPasp__PT_PROVIDER::outgoing_send(const SCTPasp__Types::ASP__SCTP__Listen
     asp_sctp_result.client__id() = fd;
     asp_sctp_result.error__status() = FALSE;
     asp_sctp_result.error__message() = OMIT_VALUE;
-    incoming_message(asp_sctp_result);
+    incoming_message(asp_sctp_result, TTCN_Runtime::now());
 #endif
   }
   log("Leaving outgoing_send (ASP_SCTP_LISTEN).");
 }
 
 
-void SCTPasp__PT_PROVIDER::outgoing_send(const SCTPasp__Types::ASP__SCTP__SetSocketOptions& send_par)
+void SCTPasp__PT_PROVIDER::outgoing_send(const SCTPasp__Types::ASP__SCTP__SetSocketOptions& send_par, FLOAT *timestamp_redirect)
 {
   log("Calling outgoing_send (ASP_SCTP_SETSOCKETOPTIONS).");
   if(simple_mode)
@@ -851,8 +860,10 @@ void SCTPasp__PT_PROVIDER::outgoing_send(const SCTPasp__Types::ASP__SCTP__SetSoc
       initmsg.sinit_max_attempts = (int) init.sinit__max__attempts();
       initmsg.sinit_max_init_timeo = (int) init.sinit__max__init__timeo();
       log("Setting SCTP socket options (initmsg).");
-      if (setsockopt(fd, IPPROTO_SCTP, SCTP_INITMSG, &initmsg,
-        sizeof(struct sctp_initmsg)) < 0)
+      int rc = setsockopt(fd, IPPROTO_SCTP, SCTP_INITMSG, &initmsg, sizeof(struct sctp_initmsg));
+      if (timestamp_redirect)
+        *timestamp_redirect = TTCN_Runtime::now();
+      if (rc < 0)
       {
          TTCN_warning("Setsockopt error!");
          SCTPasp__Types::ASP__SCTP__RESULT asp_sctp_result;
@@ -898,7 +909,10 @@ void SCTPasp__PT_PROVIDER::outgoing_send(const SCTPasp__Types::ASP__SCTP__SetSoc
       so_linger.l_linger =  (int) so.l__linger();
       // Setting a socket level option
       log("Setting SCTP socket options (so_linger).");
-      if (setsockopt(fd, SOL_SOCKET, SCTP_EVENTS, &so_linger, sizeof (so_linger)) < 0)
+      rc = setsockopt(fd, SOL_SOCKET, SCTP_EVENTS, &so_linger, sizeof (so_linger));
+      if (timestamp_redirect)
+        *timestamp_redirect = TTCN_Runtime::now();
+      if (rc < 0)
       {
         TTCN_warning("Setsockopt error!");
         SCTPasp__Types::ASP__SCTP__RESULT asp_sctp_result;
@@ -929,8 +943,10 @@ void SCTPasp__PT_PROVIDER::outgoing_send(const SCTPasp__Types::ASP__SCTP__SetSoc
       sctp_rtoinfo.srto_min =  (int) rto.srto__min();
       // Setting a SCTP level socket option
       log("Setting SCTP socket options (sctp_rtoinfo).");
-      if (setsockopt(local_fd, IPPROTO_SCTP, SCTP_RTOINFO, &sctp_rtoinfo,
-        sizeof (sctp_rtoinfo)) < 0)
+      int rc = setsockopt(local_fd, IPPROTO_SCTP, SCTP_RTOINFO, &sctp_rtoinfo, sizeof (sctp_rtoinfo));
+      if (timestamp_redirect)
+        *timestamp_redirect = TTCN_Runtime::now();
+      if (rc < 0)
       {
         TTCN_warning("Setsockopt error!");
         SCTPasp__Types::ASP__SCTP__RESULT asp_sctp_result;
@@ -958,7 +974,7 @@ void SCTPasp__PT_PROVIDER::outgoing_send(const SCTPasp__Types::ASP__SCTP__SetSoc
 }
 
 
-void SCTPasp__PT_PROVIDER::outgoing_send(const SCTPasp__Types::ASP__SCTP__Close& send_par)
+void SCTPasp__PT_PROVIDER::outgoing_send(const SCTPasp__Types::ASP__SCTP__Close& send_par, FLOAT *timestamp_redirect)
 {
   log("Calling outgoing_send (ASP_SCTP_CLOSE).");
   if(!simple_mode)
@@ -1014,11 +1030,13 @@ void SCTPasp__PT_PROVIDER::outgoing_send(const SCTPasp__Types::ASP__SCTP__Close&
       Install_Handler(&readfds, NULL, NULL, 0.0);
     }
   }
+  if (timestamp_redirect)
+    *timestamp_redirect = TTCN_Runtime::now();
   log("Leaving outgoing_send (ASP_SCTP_CLOSE).");
 }
 
 
-void SCTPasp__PT_PROVIDER::outgoing_send(const SCTPasp__Types::ASP__SCTP& send_par)
+void SCTPasp__PT_PROVIDER::outgoing_send(const SCTPasp__Types::ASP__SCTP& send_par, FLOAT *timestamp_redirect)
 {
   log("Calling outgoing_send (ASP_SCTP).");
   struct cmsghdr   *cmsg;
@@ -1088,7 +1106,10 @@ void SCTPasp__PT_PROVIDER::outgoing_send(const SCTPasp__Types::ASP__SCTP& send_p
   sri->sinfo_ppid = htonl(ui);
 
   log("Sending SCTP message to file descriptor %d.", target);
-  if (sendmsg(target, &msg, 0) < 0)
+  rc = sendmsg(target, &msg, 0);
+  if (timestamp_redirect)
+    *timestamp_redirect = TTCN_Runtime::now();
+  if (rc < 0)
   {
     SCTPasp__Types::ASP__SCTP__SENDMSG__ERROR asp_sctp_sendmsg_error;
     if (server_mode) asp_sctp_sendmsg_error.client__id() = target;
@@ -1105,13 +1126,14 @@ void SCTPasp__PT_PROVIDER::outgoing_send(const SCTPasp__Types::ASP__SCTP& send_p
 }
 
 
-SCTPasp__PT_PROVIDER::return_value_t SCTPasp__PT_PROVIDER::getmsg(int fd, struct msghdr *msg)
+SCTPasp__PT_PROVIDER::return_value_t SCTPasp__PT_PROVIDER::getmsg(int fd, struct msghdr *msg, FLOAT &timestamp)
 {
   log("Calling getmsg().");
   int index = map_get_item(fd);
   if ( !fd_map[index].processing_message ) fd_map[index].nr = 0;
 
   ssize_t value = recvmsg(fd, msg, 0);
+  timestamp = TTCN_Runtime::now();
   if (value <= 0) // EOF or error
   {
     log("Leaving getmsg(): EOF or error.");
@@ -1140,7 +1162,7 @@ SCTPasp__PT_PROVIDER::return_value_t SCTPasp__PT_PROVIDER::getmsg(int fd, struct
 }
 
 
-void SCTPasp__PT_PROVIDER::handle_event(void *buf)
+void SCTPasp__PT_PROVIDER::handle_event(void *buf, FLOAT &recv_time)
 {
   union sctp_notification  *snp;
   snp = (sctp_notification *)buf;
@@ -1203,7 +1225,7 @@ void SCTPasp__PT_PROVIDER::handle_event(void *buf)
       if (events.sctp_association_event) incoming_message(SCTPasp__Types::ASP__SCTP__ASSOC__CHANGE(
                   INTEGER(receiving_fd),
 		  sac_state_ttcn
-                  ));
+                  ), recv_time);
 
       if(simple_mode)
       {
@@ -1252,47 +1274,47 @@ void SCTPasp__PT_PROVIDER::handle_event(void *buf)
       if (events.sctp_address_event) incoming_message(SCTPasp__Types::ASP__SCTP__PEER__ADDR__CHANGE(
                   INTEGER(receiving_fd),
 		              spc_state_ttcn
-                  ));
+                  ), recv_time);
       break;
       }
     case SCTP_REMOTE_ERROR:
       log("incoming SCTP_REMOTE_ERROR event.");
       //struct sctp_remote_error *sre;
       //sre = &snp->sn_remote_error;
-      if (events.sctp_peer_error_event) incoming_message(SCTPasp__Types::ASP__SCTP__REMOTE__ERROR(INTEGER(receiving_fd)));
+      if (events.sctp_peer_error_event) incoming_message(SCTPasp__Types::ASP__SCTP__REMOTE__ERROR(INTEGER(receiving_fd)), recv_time);
       break;
     case SCTP_SEND_FAILED:
       log("incoming SCTP_SEND_FAILED event.");
       //struct sctp_send_failed *ssf;
       //ssf = &snp->sn_send_failed;
-      if (events.sctp_send_failure_event) incoming_message(SCTPasp__Types::ASP__SCTP__SEND__FAILED(INTEGER(receiving_fd)));
+      if (events.sctp_send_failure_event) incoming_message(SCTPasp__Types::ASP__SCTP__SEND__FAILED(INTEGER(receiving_fd)), recv_time);
       break;
     case SCTP_SHUTDOWN_EVENT:
       log("incoming SCTP_SHUTDOWN_EVENT event.");
       //struct sctp_shutdown_event *sse;
       //sse = &snp->sn_shutdown_event;
-      if (events.sctp_shutdown_event) incoming_message(SCTPasp__Types::ASP__SCTP__SHUTDOWN__EVENT(INTEGER(receiving_fd)));
+      if (events.sctp_shutdown_event) incoming_message(SCTPasp__Types::ASP__SCTP__SHUTDOWN__EVENT(INTEGER(receiving_fd)), recv_time);
       break;
 #if  defined(LKSCTP_1_0_7) || defined(LKSCTP_1_0_9)
     case SCTP_ADAPTATION_INDICATION:
       log("incoming SCTP_ADAPTION_INDICATION event.");
       //struct sctp_adaptation_event *sai;
       //sai = &snp->sn_adaptation_event;
-      if (events.sctp_adaptation_layer_event) incoming_message(SCTPasp__Types::ASP__SCTP__ADAPTION__INDICATION(INTEGER(receiving_fd)));
+      if (events.sctp_adaptation_layer_event) incoming_message(SCTPasp__Types::ASP__SCTP__ADAPTION__INDICATION(INTEGER(receiving_fd)), recv_time);
       break;
 #else
     case SCTP_ADAPTION_INDICATION:
       log("incoming SCTP_ADAPTION_INDICATION event.");
       //struct sctp_adaption_event *sai;
       //sai = &snp->sn_adaption_event;
-      if (events.sctp_adaption_layer_event) incoming_message(SCTPasp__Types::ASP__SCTP__ADAPTION__INDICATION(INTEGER(receiving_fd)));
+      if (events.sctp_adaption_layer_event) incoming_message(SCTPasp__Types::ASP__SCTP__ADAPTION__INDICATION(INTEGER(receiving_fd)), recv_time);
       break;
 #endif
     case SCTP_PARTIAL_DELIVERY_EVENT:
       log("incoming SCTP_PARTIAL_DELIVERY_EVENT event.");
       //struct sctp_pdapi_event *pdapi;
       //pdapi = &snp->sn_pdapi_event;
-      if (events.sctp_partial_delivery_event) incoming_message(SCTPasp__Types::ASP__SCTP__PARTIAL__DELIVERY__EVENT(INTEGER(receiving_fd)));
+      if (events.sctp_partial_delivery_event) incoming_message(SCTPasp__Types::ASP__SCTP__PARTIAL__DELIVERY__EVENT(INTEGER(receiving_fd)), recv_time);
       break;
     default:
       TTCN_warning("Unknown notification type!");
