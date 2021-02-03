@@ -1,5 +1,5 @@
 /******************************************************************************
-* Copyright (c) 2000-2019 Ericsson Telecom AB
+* Copyright (c) 2000-2021 Ericsson Telecom AB
 * All rights reserved. This program and the accompanying materials
 * are made available under the terms of the Eclipse Public License v2.0
 * which accompanies this distribution, and is available at
@@ -18,7 +18,7 @@
 //
 //  File:               SCTPasp_PT.cc
 //  Description:        SCTPasp test port source
-//  Rev:                R11A
+//  Rev:                <RnXnn>
 //  Prodnr:             CNL 113 469
 //
 
@@ -83,7 +83,8 @@ struct SCTPasp__PT_PROVIDER::fd_map_item
   void * buf; // buffer
   ssize_t buflen; // length of the buffer
   ssize_t nr; // number of received bytes
-  struct sockaddr_in  sin; // storing remote address
+  struct sockaddr_storage sin; // storing remote address
+  socklen_t saLen;
 };
 
 
@@ -91,7 +92,7 @@ struct SCTPasp__PT_PROVIDER::fd_map_server_item // server item
 {   // used by map operations
   int fd; // socket descriptor
   boolean erased;
-  struct in_addr local_IP_address;
+  CHARSTRING* local_IP_address;
   unsigned short local_port;
 };
 
@@ -105,7 +106,7 @@ SCTPasp__PT_PROVIDER::SCTPasp__PT_PROVIDER(const char *par_port_name)
   server_mode = FALSE;
   debug = FALSE;
   server_backlog = 1;
-  local_IP_address.s_addr = INADDR_ANY;
+  local_IP_address = "0.0.0.0";
   (void) memset(&initmsg, 0, sizeof(struct sctp_initmsg));
   initmsg.sinit_num_ostreams = 64;
   initmsg.sinit_max_instreams = 64;
@@ -135,8 +136,6 @@ SCTPasp__PT_PROVIDER::SCTPasp__PT_PROVIDER(const char *par_port_name)
   list_len_server=0;
 
   fd = -1;
-  FD_ZERO(&readfds);
-  FD_ZERO(&writefds);
   local_port=-1;
   peer_port=-1;
   receiving_fd=-1;
@@ -220,7 +219,7 @@ void SCTPasp__PT_PROVIDER::set_parameter(const char *parameter_name,
   }
   else if(strcmp(parameter_name, "local_IP_address") == 0)
   {
-    local_IP_address = get_in_addr((const char *) parameter_value);
+    local_IP_address =  parameter_value;
   }
   else if(strcmp(parameter_name, "local_port") == 0)
   {
@@ -236,7 +235,7 @@ void SCTPasp__PT_PROVIDER::set_parameter(const char *parameter_name,
   }
   else if(strcmp(parameter_name, "peer_IP_address") == 0)
   {
-  peer_IP_address = get_in_addr((const char *) parameter_value);
+  peer_IP_address = parameter_value;
   peer_IP_address_is_present = TRUE;
   }
   else if(strcmp(parameter_name, "peer_port") == 0)
@@ -371,66 +370,14 @@ void SCTPasp__PT_PROVIDER::set_parameter(const char *parameter_name,
   errno = 0;
 }
 
-
-void SCTPasp__PT_PROVIDER::Event_Handler(const fd_set *read_fds,
-  const fd_set *write_fds, const fd_set */*error_fds*/,
-  double /*time_since_last_call*/)
-{
-  // Accepting new client
-  if(!simple_mode)
-  {
-    for(int i=0;i<list_len_server;i++)
-    {
-      if(!fd_map_server[i].erased && FD_ISSET(fd_map_server[i].fd, read_fds))
-      {
-        int newclient_fd;
-        struct sockaddr_in peer_address;
-        socklen_t addrlen = sizeof(peer_address);
-        if ((newclient_fd = accept(fd_map_server[i].fd, (struct sockaddr *)&peer_address, &addrlen)) == -1)
-          error("Event handler: accept error (server mode)!");
-        else
-        {
-          map_put_item(newclient_fd);
-          setNonBlocking(newclient_fd);
-          FD_SET(newclient_fd, &readfds);
-          incoming_message(SCTPasp__Types::ASP__SCTP__Connected(
-                        INTEGER(newclient_fd),
-                        CHARSTRING(inet_ntoa(fd_map_server[i].local_IP_address)),
-                        INTEGER(fd_map_server[i].local_port),
-                        CHARSTRING(inet_ntoa(peer_address.sin_addr)),
-                        INTEGER(ntohs(peer_address.sin_port))));
-          Install_Handler(&readfds, NULL, NULL, 0.0);
-        }
-      }
-    }
-  }
-  else
-  {
-    if(server_mode && FD_ISSET(fd, read_fds))
-    {
-      int newclient_fd;
-      struct sockaddr_in peer_address;
-      socklen_t addrlen = sizeof(peer_address);
-      if ((newclient_fd = accept(fd, (struct sockaddr *)&peer_address, &addrlen)) == -1)
-        error("Event handler: accept error (server mode)!");
-      else
-      {
-        map_put_item(newclient_fd);
-        setNonBlocking(newclient_fd);
-        FD_SET(newclient_fd, &readfds);
-        Install_Handler(&readfds, NULL, NULL, 0.0);
-      }
-    }
-  }
-  // Receiving data
-  for(int i=0;i<list_len;i++)
-  {
-    if(!simple_mode && !fd_map[i].erased && fd_map[i].einprogress &&
-      FD_ISSET(fd_map[i].fd, write_fds))
+void SCTPasp__PT_PROVIDER::Handle_Fd_Event_Writable(int my_fd){
+  int i= map_get_item(my_fd);
+  if(i!=-1 && !simple_mode && !fd_map[i].erased && fd_map[i].einprogress )
     {
       if (connect(fd_map[i].fd, (struct sockaddr *)&fd_map[i].sin,
-        sizeof (fd_map[i].sin)) == -1)
+        fd_map[i].saLen) == -1)
       {
+        Handler_Remove_Fd_Write(fd_map[i].fd);
         if(errno == EISCONN)
         {
           SCTPasp__Types::ASP__SCTP__RESULT asp_sctp_result;
@@ -439,12 +386,8 @@ void SCTPasp__PT_PROVIDER::Event_Handler(const fd_set *read_fds,
           asp_sctp_result.error__message() = OMIT_VALUE;
           incoming_message(asp_sctp_result);
           fd_map[i].einprogress = FALSE;
-          FD_CLR(fd_map[i].fd, &writefds);
-          FD_SET(fd_map[i].fd, &readfds);
-          Install_Handler(&readfds, &writefds, NULL, 0.0);
-          errno = 0;
-          log("Connection successfully established to (%s):(%d)",
-            inet_ntoa(peer_IP_address), peer_port);
+          Handler_Add_Fd_Read(fd_map[i].fd);
+          log("Connection successfully established to (%s):(%d)",(const char*)peer_IP_address, peer_port);
         }
         else
         {
@@ -456,17 +399,91 @@ void SCTPasp__PT_PROVIDER::Event_Handler(const fd_set *read_fds,
           asp_sctp_result.error__status() = TRUE;
           asp_sctp_result.error__message() = strerror(errno);
           incoming_message(asp_sctp_result);
-          FD_CLR(fd_map[i].fd, &writefds);
           map_delete_item_fd(fd_map[i].fd);
-          Install_Handler(&readfds, &writefds, NULL, 0.0);
           errno = 0;
           log("Connection establishment to (%s):(%d) failed !",
-            inet_ntoa(peer_IP_address), peer_port);
+            (const char*)peer_IP_address, peer_port);
         }
       }
     }
+  
+}
 
-    if(!fd_map[i].erased && FD_ISSET(fd_map[i].fd, read_fds))
+void SCTPasp__PT_PROVIDER::Handle_Fd_Event_Error(int my_fd){
+  Handle_Fd_Event_Readable(my_fd);
+}
+
+CHARSTRING get_ip(struct sockaddr_storage *sa){
+  char ret_val[INET6_ADDRSTRLEN];
+  ret_val[0]='\0';
+  if(sa->ss_family == AF_INET){
+    struct sockaddr_in* sa4=(struct sockaddr_in*)sa;
+    inet_ntop(AF_INET,&(sa4->sin_addr),ret_val,INET6_ADDRSTRLEN);
+  } else if(sa->ss_family == AF_INET6) {
+    struct sockaddr_in6* sa6=(struct sockaddr_in6*)sa;
+    inet_ntop(AF_INET6,&(sa6->sin6_addr),ret_val,INET6_ADDRSTRLEN);
+  }
+  return CHARSTRING(ret_val);
+}
+int get_port(struct sockaddr_storage *sa){
+  if(sa->ss_family == AF_INET){
+    struct sockaddr_in* sa4=(struct sockaddr_in*)sa;
+    return ntohs(sa4->sin_port);
+  } else if(sa->ss_family == AF_INET6) {
+    struct sockaddr_in6* sa6=(struct sockaddr_in6*)sa;
+    return ntohs(sa6->sin6_port);
+  }
+  return 0;
+}
+
+void SCTPasp__PT_PROVIDER::Handle_Fd_Event_Readable(int my_fd){
+    // Accepting new client
+  if(!simple_mode)
+  {
+    for(int i=0;i<list_len_server;i++)
+    {
+      if(!fd_map_server[i].erased && fd_map_server[i].fd==my_fd)
+      {
+        int newclient_fd;
+        struct sockaddr_storage peer_address;
+        socklen_t addrlen = sizeof(peer_address);
+        if ((newclient_fd = accept(fd_map_server[i].fd, (struct sockaddr *)&peer_address, &addrlen)) == -1)
+          error("Event handler: accept error (server mode)!");
+        else
+        {
+          map_put_item(newclient_fd);
+          setNonBlocking(newclient_fd);
+          Handler_Add_Fd_Read(newclient_fd);
+          incoming_message(SCTPasp__Types::ASP__SCTP__Connected(
+                        INTEGER(newclient_fd),
+                        *fd_map_server[i].local_IP_address,
+                        INTEGER(fd_map_server[i].local_port),
+                        get_ip(&peer_address),
+                        get_port(&peer_address)));
+        }
+      }
+    }
+  }
+  else
+  {
+    if(server_mode && fd==my_fd)
+    {
+      int newclient_fd;
+      struct sockaddr_storage peer_address;
+      socklen_t addrlen = sizeof(peer_address);
+      if ((newclient_fd = accept(fd, (struct sockaddr *)&peer_address, &addrlen)) == -1)
+        error("Event handler: accept error (server mode)!");
+      else
+      {
+        map_put_item(newclient_fd);
+        setNonBlocking(newclient_fd);
+        Handler_Add_Fd_Read(newclient_fd);
+     }
+    }
+  }
+  // Receiving data
+  int i= map_get_item(my_fd);
+  if(i!=-1) // valid fd
     {
       log("Calling Event_Handler.");
       receiving_fd = fd_map[i].fd;
@@ -541,8 +558,6 @@ void SCTPasp__PT_PROVIDER::Event_Handler(const fd_set *read_fds,
           break;
         case EOF_OR_ERROR:
           if (!server_mode) fd = -1; // setting closed socket to -1 in client mode (and reconnect mode)
-          FD_CLR(receiving_fd, &readfds);
-          Install_Handler(&readfds, NULL, NULL, 0.0);
           map_delete_item(i);
           if (events.sctp_association_event) incoming_message(SCTPasp__Types::ASP__SCTP__ASSOC__CHANGE(
                   INTEGER(receiving_fd),
@@ -553,7 +568,8 @@ void SCTPasp__PT_PROVIDER::Event_Handler(const fd_set *read_fds,
           break;
       }//endswitch
     }// endif
-  }// endfor
+
+
 }
 
 
@@ -575,11 +591,19 @@ void SCTPasp__PT_PROVIDER::user_map(const char *system_port)
     if (server_mode)
     {
       log("Running in SERVER_MODE.");
-      create_socket();
+      
+      struct sockaddr_storage sa; 
+      socklen_t saLen=sizeof(sa);
+      int sock_type=fill_addr_struct(local_IP_address,local_port,&sa,saLen);
+      fd=create_socket(sock_type);
+      
+      if(bind(fd,(const struct sockaddr *)&sa,saLen)!=0){
+        error("bind failed: %d, %s", errno, strerror(errno));
+      }
+      
       if (listen(fd, server_backlog) == -1) error("Listen error!");
-      log("Listening @ (%s):(%d)", inet_ntoa(local_IP_address), local_port);
-      FD_SET(fd, &readfds);
-      Install_Handler(&readfds, NULL, NULL, 0.0);
+      log("Listening @ (%s):(%d)", (const char*)local_IP_address, local_port);
+      Handler_Add_Fd_Read(fd);
     } else if (reconnect) {
       log("Running in RECONNECT MODE.");
       forced_reconnect(reconnect_max_attempts+1);
@@ -598,9 +622,6 @@ void SCTPasp__PT_PROVIDER::user_map(const char *system_port)
 void SCTPasp__PT_PROVIDER::user_unmap(const char *system_port)
 {
   log("Calling user_unmap(%s).",system_port);
-  Uninstall_Handler();
-  FD_ZERO(&readfds);
-  FD_ZERO(&writefds);
   if(!simple_mode)
   {
     for(int i=0;i<list_len;i++) map_delete_item(i);
@@ -609,7 +630,10 @@ void SCTPasp__PT_PROVIDER::user_unmap(const char *system_port)
   else
   {
     for(int i=0;i<list_len;i++) map_delete_item(i);
-    if(server_mode) close(fd);
+    if(server_mode && fd != -1) {
+      close(fd);
+      Handler_Remove_Fd(fd, EVENT_ALL);
+    }
   }
   log("Leaving user_unmap().");
 }
@@ -636,53 +660,56 @@ void SCTPasp__PT_PROVIDER::outgoing_send(const SCTPasp__Types::ASP__SCTP__Connec
   {
     if (server_mode)
       error("ASP_SCTP_CONNECT is not allowed in server mode!");
+    if(fd != -1)
+      error("ASP_SCTP_CONNECT called during active connection.");
   }
   if( !peer_IP_address_is_present && !send_par.peer__hostname().ispresent() )
     error("Peer IP address should be defined!");
 
   if( !peer_port_is_present && !send_par.peer__portnumber().ispresent() )
     error("Peer port should be defined!");
-  if(!simple_mode)
-  {
-    boolean temp_bool = local_port_is_present;
-    local_port_is_present = FALSE;
-    create_socket();  // creating client socket
-    local_port_is_present = temp_bool;
-  }
-  else
-  {
-    if (fd == -1) create_socket();  // checking if there is an open socket
-    else if(FD_ISSET(fd, &readfds)) // Active connection
-      error("ASP_SCTP_CONNECT called during active connection.");
-  }
-  struct sockaddr_in  sin;
+
+  
   if(send_par.peer__hostname().ispresent())
   {
-    peer_IP_address = get_in_addr((const char *)(const CHARSTRING&)send_par.peer__hostname());
+    peer_IP_address = send_par.peer__hostname()();
   }
-  if(send_par.peer__portnumber().ispresent())
-    peer_port = (int) (const INTEGER&) send_par.peer__portnumber();
+  if(send_par.peer__portnumber().ispresent()){
+    peer_port = (int) send_par.peer__portnumber()();
+  }
+  
+  struct sockaddr_storage sa; 
+  socklen_t saLen;
+  int sock_type=fill_addr_struct(peer_IP_address,peer_port,&sa,saLen);
+  
+  fd=create_socket(sock_type);
 
-  sin.sin_family = AF_INET;
-  sin.sin_port = htons(peer_port);
-  sin.sin_addr.s_addr = peer_IP_address.s_addr;
-  log("Connecting to (%s):(%d)", inet_ntoa(peer_IP_address), peer_port);
+  if(simple_mode && local_port_is_present){
+    // we should bind
+    struct sockaddr_storage loc_sa; 
+    socklen_t loc_saLen;
+    int loc_sock_type=fill_addr_struct(local_IP_address,local_port,&loc_sa,loc_saLen);
+    if(sock_type!=loc_sock_type)
+      error("The local and peer IP addreses are different type: %s %i %s %i", (const char*)peer_IP_address,sock_type,(const char*)local_IP_address,loc_sock_type);
+    
+    if(bind(fd,(const struct sockaddr *)&loc_sa,loc_saLen)!=0){
+      error("bind failed %d %s",errno, strerror(errno));
+    }
+  }
+  log("Connecting to (%s):(%d)", (const char*)peer_IP_address, peer_port);
   // setting non-blocking mode
   if(!simple_mode) setNonBlocking(fd);
-  if (connect(fd, (struct sockaddr *)&sin, sizeof (sin)) == -1)
+  if (connect(fd, (const struct sockaddr *)&sa, saLen) == -1)
   {
     if(errno == EINPROGRESS && !simple_mode)
     {
       map_put_item(fd);
       int i = map_get_item(fd);
       fd_map[i].einprogress = TRUE;
-      fd_map[i].sin.sin_family = AF_INET;
-      fd_map[i].sin.sin_port = htons(peer_port);;
-      fd_map[i].sin.sin_addr.s_addr= peer_IP_address.s_addr;
-      FD_SET(fd, &writefds);
-      Install_Handler(&readfds, &writefds, NULL, 0.0);
-      log("Connection in progress to (%s):(%d)", inet_ntoa(peer_IP_address),
-        peer_port);
+      fd_map[i].sin = sa;
+      fd_map[i].saLen = saLen;
+      Handler_Add_Fd_Write(fd);
+      log("Connection in progress to (%s):(%d)",(const char*)peer_IP_address, peer_port);
     }
     else
     {
@@ -706,9 +733,8 @@ void SCTPasp__PT_PROVIDER::outgoing_send(const SCTPasp__Types::ASP__SCTP__Connec
     incoming_message(asp_sctp_result);
     map_put_item(fd);
     if(simple_mode) setNonBlocking(fd);
-    FD_SET(fd, &readfds);
-    Install_Handler(&readfds, NULL, NULL, 0.0);
-    log("Connection successfully established to (%s):(%d)", inet_ntoa(peer_IP_address), peer_port);
+    Handler_Add_Fd_Read(fd);
+    log("Connection successfully established to (%s):(%d)", (const char*)peer_IP_address, peer_port);
   }
   log("Leaving outgoing_send (ASP_SCTP_CONNECT).");
 }
@@ -724,45 +750,46 @@ void SCTPasp__PT_PROVIDER::outgoing_send(const SCTPasp__Types::ASP__SCTP__Connec
     if( !peer_port_is_present && !send_par.peer__portnumber().ispresent() )
       error("Peer port should be defined!");
     // work around for create_socket()
-    unsigned short temp = local_port; // saving global variables
-    boolean temp_bool = local_port_is_present;
-    struct in_addr temp_local_IP_address = local_IP_address;
-    local_port = (int) (const INTEGER&) send_par.local__portnumber();
-    local_port_is_present = TRUE;
-    if(send_par.local__hostname().ispresent())
-    {
-      local_IP_address = get_in_addr((const char *)(const CHARSTRING&)send_par.local__hostname());
-    }
-    create_socket();  // creating client socket
 
-    struct sockaddr_in  sin;
     if(send_par.peer__hostname().ispresent())
     {
-      peer_IP_address = get_in_addr((const char *)(const CHARSTRING&)send_par.peer__hostname());
+      peer_IP_address = send_par.peer__hostname()();
     }
-    if(send_par.peer__portnumber().ispresent())
-      peer_port = (int) (const INTEGER&) send_par.peer__portnumber();
+    if(send_par.peer__portnumber().ispresent()){
+      peer_port = (int) send_par.peer__portnumber()();
+    }
 
-    sin.sin_family = AF_INET;
-    sin.sin_port = htons(peer_port);
-    sin.sin_addr.s_addr = peer_IP_address.s_addr;
-    log("Connecting to (%s):(%d)", inet_ntoa(peer_IP_address), peer_port);
+    struct sockaddr_storage sa; 
+    socklen_t saLen;
+    int sock_type=fill_addr_struct(peer_IP_address,peer_port,&sa,saLen);
+    
+    struct sockaddr_storage loc_sa; 
+    socklen_t loc_saLen;
+    int loc_sock_type=fill_addr_struct(send_par.local__hostname().ispresent()?send_par.local__hostname()():local_IP_address,
+                                       (int) send_par.local__portnumber(),&loc_sa,loc_saLen);
+    if(sock_type!=loc_sock_type)
+      error("The local and peer IP addreses are different type: %s %i %s %i", (const char*)peer_IP_address,sock_type,(const char*)local_IP_address,loc_sock_type);
+    
+    fd=create_socket(sock_type);
+    
+    if(bind(fd,(const struct sockaddr *)&loc_sa,loc_saLen)!=0){
+      error("bind failed %d %s",errno, strerror(errno));
+    }
+
+    log("Connecting to (%s):(%d)", (const char*)peer_IP_address, peer_port);
     // setting non-blocking mode
     setNonBlocking(fd);
-    if (connect(fd, (struct sockaddr *)&sin, sizeof (sin)) == -1)
+    if (connect(fd, (struct sockaddr *)&sa, saLen) == -1)
     {
       if(errno == EINPROGRESS)
       {
         map_put_item(fd);
         int i = map_get_item(fd);
         fd_map[i].einprogress = TRUE;
-        fd_map[i].sin.sin_family = AF_INET;
-        fd_map[i].sin.sin_port = htons(peer_port);;
-        fd_map[i].sin.sin_addr.s_addr= peer_IP_address.s_addr;
-        FD_SET(fd, &writefds);
-        Install_Handler(&readfds, &writefds, NULL, 0.0);
-        log("Connection in progress to (%s):(%d)", inet_ntoa(peer_IP_address),
-          peer_port);
+        fd_map[i].sin = sa;
+        fd_map[i].saLen = saLen;
+        Handler_Add_Fd_Write(fd);
+        log("Connection in progress to (%s):(%d)",(const char*)peer_IP_address, peer_port);
       }
       else
       {
@@ -785,13 +812,9 @@ void SCTPasp__PT_PROVIDER::outgoing_send(const SCTPasp__Types::ASP__SCTP__Connec
       asp_sctp_result.error__message() = OMIT_VALUE;
       incoming_message(asp_sctp_result);
       map_put_item(fd);
-      FD_SET(fd, &readfds);
-      Install_Handler(&readfds, NULL, NULL, 0.0);
-      log("Connection successfully established to (%s):(%d)", inet_ntoa(peer_IP_address), peer_port);
+      Handler_Add_Fd_Read(fd);
+      log("Connection successfully established to (%s):(%d)", (const char*)peer_IP_address, peer_port);
     }
-    local_port = temp; // restoring global variables
-    local_port_is_present = temp_bool;
-    local_IP_address = temp_local_IP_address;
   }
   log("Leaving outgoing_send (ASP_SCTP_CONNECTFROM).");
 }
@@ -802,25 +825,21 @@ void SCTPasp__PT_PROVIDER::outgoing_send(const SCTPasp__Types::ASP__SCTP__Listen
   log("Calling outgoing_send (ASP_SCTP_LISTEN).");
   if(!simple_mode)
   {
-    // work around for create_socket()
-    unsigned short temp = local_port; // saving global variables
-    boolean temp_bool = local_port_is_present;
-    struct in_addr temp_local_IP_address = local_IP_address;
-    local_port = (int) (const INTEGER&) send_par.local__portnumber();
-    local_port_is_present = TRUE;
-    if(send_par.local__hostname().ispresent())
-    {
-      local_IP_address = get_in_addr((const char *)(const CHARSTRING&)send_par.local__hostname());
+    const CHARSTRING& loc_name=send_par.local__hostname().ispresent()?send_par.local__hostname()():local_IP_address;
+    struct sockaddr_storage loc_sa; 
+    socklen_t loc_saLen;
+    int loc_sock_type=fill_addr_struct(loc_name,(int) send_par.local__portnumber(),&loc_sa,loc_saLen);
+
+    fd=create_socket(loc_sock_type);
+    
+    if(bind(fd,(const struct sockaddr *)&loc_sa,loc_saLen)!=0){
+      error("bind failed %d %s",errno, strerror(errno));
     }
-    create_socket();
+ 
     if (listen(fd, server_backlog) == -1) error("Listen error!");
-    map_put_item_server(fd, local_IP_address, local_port);
-    log("Listening @ (%s):(%d)", inet_ntoa(local_IP_address), local_port);
-    local_port = temp; // restoring global variables
-    local_port_is_present = temp_bool;
-    local_IP_address = temp_local_IP_address;
-    FD_SET(fd, &readfds);
-    Install_Handler(&readfds, NULL, NULL, 0.0);
+    map_put_item_server(fd, loc_name, (int) send_par.local__portnumber());
+    log("Listening @ (%s):(%d)", (const char *)loc_name, (int) send_par.local__portnumber());
+    Handler_Add_Fd_Read(fd);
 #ifdef SCTP_REPORT_LISTEN_RESULT
     SCTPasp__Types::ASP__SCTP__RESULT asp_sctp_result;
     asp_sctp_result.client__id() = fd;
@@ -836,10 +855,6 @@ void SCTPasp__PT_PROVIDER::outgoing_send(const SCTPasp__Types::ASP__SCTP__Listen
 void SCTPasp__PT_PROVIDER::outgoing_send(const SCTPasp__Types::ASP__SCTP__SetSocketOptions& send_par)
 {
   log("Calling outgoing_send (ASP_SCTP_SETSOCKETOPTIONS).");
-  if(simple_mode)
-  {
-    if (fd == -1) create_socket(); // checking if there is an open socket
-  }
   switch (send_par.get_selection())
   {
     case SCTPasp__Types::ASP__SCTP__SetSocketOptions::ALT_Sctp__init:
@@ -969,17 +984,12 @@ void SCTPasp__PT_PROVIDER::outgoing_send(const SCTPasp__Types::ASP__SCTP__Close&
       log("NORMAL MODE: closing client/server socket (fd = %d).", local_fd);
       map_delete_item_fd(local_fd);
       map_delete_item_fd_server(local_fd);
-      FD_CLR(local_fd, &readfds);
-      Install_Handler(&readfds, &writefds, NULL, 0.0);
     }
     else
     {   // if OMIT is given then all sockets will be closed
       log("NORMAL MODE: closing all sockets.");
       for(int i=0;i<list_len;i++) map_delete_item(i);
       for(int i=0;i<list_len_server;i++) map_delete_item_server(i);
-      FD_ZERO(&readfds);
-      FD_ZERO(&writefds);
-      Install_Handler(&readfds, &writefds, NULL, 0.0); // ???
     }
   }
   else
@@ -991,16 +1001,11 @@ void SCTPasp__PT_PROVIDER::outgoing_send(const SCTPasp__Types::ASP__SCTP__Close&
         int local_fd = (int) (const INTEGER&) send_par.client__id();
         log("SERVER MODE: closing client socket (fd = %d).", local_fd);
         map_delete_item_fd(local_fd);
-        FD_CLR(local_fd, &readfds);
-        Install_Handler(&readfds, NULL, NULL, 0.0);
       }
       else
       {   // if OMIT is given in server mode then all clients will be closed
         log("SERVER MODE: closing all client sockets.");
         for(int i=0;i<list_len;i++) map_delete_item(i);
-        FD_ZERO(&readfds);
-        FD_SET(fd, &readfds); // leaving only the listening socket in the fdset
-        Install_Handler(&readfds, NULL, NULL, 0.0);
       }
     }
     else
@@ -1009,9 +1014,7 @@ void SCTPasp__PT_PROVIDER::outgoing_send(const SCTPasp__Types::ASP__SCTP__Close&
         error("In client mode the client_id field of ASP_SCTP_Close should be set to OMIT!");
       log("CLIENT MODE: closing socket (fd = %d).", fd);
       map_delete_item_fd(fd);
-      FD_CLR(fd, &readfds);
       fd=-1;
-      Install_Handler(&readfds, NULL, NULL, 0.0);
     }
   }
   log("Leaving outgoing_send (ASP_SCTP_CLOSE).");
@@ -1188,14 +1191,10 @@ void SCTPasp__PT_PROVIDER::handle_event(void *buf)
         if(simple_mode)
         {
           if (!server_mode) fd = -1; // setting closed socket to -1 in client mode (and reconnect mode)
-          FD_CLR(receiving_fd, &readfds);
-          Install_Handler(&readfds, NULL, NULL, 0.0);
           map_delete_item_fd(receiving_fd);
         }
         else
         {
-          FD_CLR(receiving_fd, &readfds);
-          Install_Handler(&readfds, NULL, NULL, 0.0);
           map_delete_item_fd(receiving_fd);
           map_delete_item_fd_server(receiving_fd);
         }
@@ -1332,17 +1331,17 @@ void SCTPasp__PT_PROVIDER::error(const char *fmt, ...)
 
 void SCTPasp__PT_PROVIDER::forced_reconnect(int attempts)
 {
-  struct sockaddr_in  sin;
-  sin.sin_family = AF_INET;
-  sin.sin_port = htons(peer_port);
-  sin.sin_addr.s_addr = peer_IP_address.s_addr;
-  log("[reconnect] Connecting to (%s):(%d)", inet_ntoa(peer_IP_address), peer_port);
+  struct sockaddr_storage sa; 
+  socklen_t saLen;
+  int sock_type=fill_addr_struct(peer_IP_address,peer_port,&sa,saLen);
+  
+  log("[reconnect] Connecting to (%s):(%d)", (const char*)peer_IP_address, peer_port);
   unsigned int sleep_interval = 1;
   int i;
   for(i = 0; i < attempts; i++)
   {
-    create_socket();
-    if (connect(fd, (struct sockaddr *)&sin, sizeof (sin)) == -1)
+    fd=create_socket(sock_type);
+    if (connect(fd, (struct sockaddr *)&sa, saLen) == -1)
     {
       close(fd);
       fd = -1;
@@ -1356,9 +1355,8 @@ void SCTPasp__PT_PROVIDER::forced_reconnect(int attempts)
     {
       map_put_item(fd);
       setNonBlocking(fd);
-      FD_SET(fd, &readfds);
-      Install_Handler(&readfds, NULL, NULL, 0.0);
-      log("[reconnect] Connection successfully established to (%s):(%d)", inet_ntoa(peer_IP_address), peer_port);
+      Handler_Add_Fd_Read(fd);
+      log("[reconnect] Connection successfully established to (%s):(%d)", (const char *)peer_IP_address, peer_port);
       break;
     }
   }
@@ -1384,9 +1382,8 @@ void SCTPasp__PT_PROVIDER::map_put_item(int fd)
       fd_map[k].buflen=0;
       fd_map[k].processing_message=FALSE;
       fd_map[k].nr=0;
-      fd_map[k].sin.sin_family=AF_INET;
-      fd_map[k].sin.sin_port=0;
-      fd_map[k].sin.sin_addr.s_addr=0;
+      fd_map[k].saLen=0;
+      memset(&fd_map[k].sin,0,sizeof(struct sockaddr_storage));
     }
   }
   fd_map[i].fd=fd;        // adding new connection
@@ -1418,7 +1415,7 @@ void SCTPasp__PT_PROVIDER::map_delete_item(int index)
 {
   if((index>=list_len) || (index<0)) error("map_delete_item: index out of range (0-%d): %d",list_len-1,index);
 
-  if(fd_map[index].fd!=-1) close(fd_map[index].fd);
+  if(fd_map[index].fd!=-1) {close(fd_map[index].fd);Handler_Remove_Fd(fd_map[index].fd, EVENT_ALL);}
   fd_map[index].fd=-1;
   fd_map[index].erased=TRUE;
   fd_map[index].einprogress=FALSE;
@@ -1427,13 +1424,13 @@ void SCTPasp__PT_PROVIDER::map_delete_item(int index)
   fd_map[index].buflen=0;
   fd_map[index].processing_message=FALSE;
   fd_map[index].nr=0;
-  fd_map[index].sin.sin_family=AF_INET;
-  fd_map[index].sin.sin_port=0;
-  fd_map[index].sin.sin_addr.s_addr=0;
+  fd_map[index].saLen=0;
+  memset(&fd_map[index].sin,0,sizeof(struct sockaddr_storage));
+
 }
 
 
-void SCTPasp__PT_PROVIDER::map_put_item_server(int fd, struct in_addr local_IP_address, unsigned short local_port)
+void SCTPasp__PT_PROVIDER::map_put_item_server(int fd, const CHARSTRING& local_IP_address, unsigned short local_port)
 {
   int i=0;
   while((i<list_len_server) && !fd_map_server[i].erased) i++; // searching for the free item
@@ -1445,13 +1442,16 @@ void SCTPasp__PT_PROVIDER::map_put_item_server(int fd, struct in_addr local_IP_a
     {  // init new elements
       fd_map_server[k].fd=-1;
       fd_map_server[k].erased=TRUE;
-      fd_map_server[k].local_IP_address.s_addr = INADDR_ANY;
+      fd_map_server[k].local_IP_address = NULL;
       fd_map_server[k].local_port = 0;
     }
   }
   fd_map_server[i].fd=fd;        // adding new connection
   fd_map_server[i].erased=FALSE;
-  fd_map_server[i].local_IP_address = local_IP_address;
+  if(fd_map_server[i].local_IP_address == NULL){
+    fd_map_server[i].local_IP_address = new CHARSTRING();
+  }
+  *fd_map_server[i].local_IP_address = local_IP_address;
   fd_map_server[i].local_port = local_port;
 
 }
@@ -1481,41 +1481,85 @@ void SCTPasp__PT_PROVIDER::map_delete_item_server(int index)
 {
   if((index>=list_len_server) || (index<0)) error("map_delete_item: index out of range (0-%d): %d",list_len_server-1,index);
 
-  if(fd_map_server[index].fd!=-1) close(fd_map_server[index].fd);
+  if(fd_map_server[index].fd!=-1) {close(fd_map_server[index].fd);Handler_Remove_Fd(fd_map_server[index].fd, EVENT_ALL);}
   fd_map_server[index].fd=-1;
   fd_map_server[index].erased=TRUE;
-  fd_map_server[index].local_IP_address.s_addr = INADDR_ANY;
+  if(fd_map_server[index].local_IP_address != NULL){ delete fd_map_server[index].local_IP_address;}
+  fd_map_server[index].local_IP_address = NULL;
   fd_map_server[index].local_port = 0;
 }
 
+int SCTPasp__PT_PROVIDER::fill_addr_struct(const char* name, int port, struct sockaddr_storage* sa, socklen_t& saLen){
 
-void SCTPasp__PT_PROVIDER::create_socket()
-{
-  struct sockaddr_in  sin;
-  int enable = 1;
 
-  log("Creating SCTP socket.");
-  if ((fd = socket(AF_INET, SOCK_STREAM, IPPROTO_SCTP)) == -1)
-    error("Socket error: cannot create socket!");
+  //int err = 0;
+  int addrtype = -1;
+  struct sockaddr_in saddr;
+  struct sockaddr_in6 saddr6;
+  memset(sa,0,sizeof(struct sockaddr_storage));
 
-  setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &enable, sizeof(enable));
-
-  if ( local_port_is_present ) {
-    sin.sin_family = AF_INET;
-    sin.sin_port = htons(local_port);
-    sin.sin_addr.s_addr = local_IP_address.s_addr;
-    log("Binding SCTP socket: bind address (%s):(%d)",
-      inet_ntoa(local_IP_address),local_port);
-    if (bind(fd, (struct sockaddr *)&sin, sizeof (sin)) == -1)
-    {
-      close(fd);
-      fd = -1;
-      error("Bind error!");
-    }
+  struct sockaddr_in* v4=(sockaddr_in*)sa;
+  struct sockaddr_in6* v6=(sockaddr_in6*)sa;
+  
+  
+  if(inet_pton(AF_INET, name, &(saddr.sin_addr))) {
+    saLen = sizeof(*v4);
+    v4->sin_family = AF_INET;
+    v4->sin_port = htons(port);
+    memcpy(&(v4->sin_addr), &(saddr.sin_addr), sizeof(saddr.sin_addr));
+    addrtype = AF_INET;
   }
+  else if(inet_pton(AF_INET6, name, &(saddr6.sin6_addr))) {
+    saLen = sizeof(*v6);
+    v6->sin6_family = AF_INET6;
+    v6->sin6_port = htons(port);
+    memcpy(&(v6->sin6_addr), &(saddr6.sin6_addr), sizeof(saddr6.sin6_addr));
+    addrtype = AF_INET6;
+  }
+  else {
+
+    struct addrinfo myaddr, *res;
+    memset(&myaddr,0,sizeof(myaddr));
+    myaddr.ai_flags = AI_ADDRCONFIG|AI_PASSIVE;
+    myaddr.ai_socktype = SOCK_STREAM;
+    myaddr.ai_protocol = 0;
+
+//    if ((err = getaddrinfo(name, NULL, &myaddr, &res)) != 0) {
+    if (getaddrinfo(name, NULL, &myaddr, &res) != 0) {
+      //printf("SetSockAddr: getaddrinfo error: %i, %s", err, gai_strerror(err));
+      error("Can't resolve host name: %s",name);
+    }
+
+    if (res->ai_addr->sa_family == AF_INET) { // IPv4
+      struct sockaddr_in *saddr = (struct sockaddr_in *) res->ai_addr;
+      saLen = sizeof(*v4);
+      v4->sin_family = AF_INET;
+      v4->sin_port = htons(port);
+      memcpy(&(v4->sin_addr), &(saddr->sin_addr), sizeof(saddr->sin_addr));
+      addrtype = AF_INET;
+    }
+    else if (res->ai_addr->sa_family == AF_INET6){ // IPv6
+      struct sockaddr_in6 *saddr = (struct sockaddr_in6 *) res->ai_addr;
+      saLen = sizeof(*v6);
+      memcpy(v6,saddr,saLen);
+      v6->sin6_port = htons(port);
+      addrtype = AF_INET6;
+    }
+    freeaddrinfo(res);
+  }
+  return addrtype;
+  
+}
+
+int SCTPasp__PT_PROVIDER::create_socket(int addr_family)
+{
+  int local_fd;
+  log("Creating SCTP socket.");
+  if ((local_fd = socket(addr_family, SOCK_STREAM, IPPROTO_SCTP)) == -1)
+    error("Socket error: cannot create socket! %d %s %d %d",errno, strerror(errno),addr_family,AF_INET);
 
   log("Setting SCTP socket options (initmsg).");
-  if (setsockopt(fd, IPPROTO_SCTP, SCTP_INITMSG, &initmsg,
+  if (setsockopt(local_fd, IPPROTO_SCTP, SCTP_INITMSG, &initmsg,
     sizeof(struct sctp_initmsg)) < 0)
   {
     TTCN_warning("Setsockopt error!");
@@ -1523,22 +1567,14 @@ void SCTPasp__PT_PROVIDER::create_socket()
   }
 
   log("Setting SCTP socket options (events).");
-  if (setsockopt(fd, IPPROTO_SCTP, SCTP_EVENTS, &events, sizeof (events)) < 0)
+  if (setsockopt(local_fd, IPPROTO_SCTP, SCTP_EVENTS, &events, sizeof (events)) < 0)
   {
     TTCN_warning("Setsockopt error!");
     errno = 0;
   }
+  return local_fd;
 }
 
-
-in_addr SCTPasp__PT_PROVIDER::get_in_addr(const char *hostname)
-{
-  struct hostent *h;
-  if ((h=gethostbyname(hostname)) == NULL)
-    error("Gethostbyname error!");
-  if(h->h_addr == NULL) error("Gethostbyname error! h->h_addr is NULL!");
-  return *((struct in_addr *)h->h_addr);
-}
 
 void SCTPasp__PT_PROVIDER::setNonBlocking(int fd)
 {

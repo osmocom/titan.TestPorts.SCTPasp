@@ -1,5 +1,5 @@
 /******************************************************************************
-* Copyright (c) 2000-2019 Ericsson Telecom AB
+* Copyright (c) 2000-2021 Ericsson Telecom AB
 * All rights reserved. This program and the accompanying materials
 * are made available under the terms of the Eclipse Public License v2.0
 * which accompanies this distribution, and is available at
@@ -18,7 +18,6 @@
 //
 //  File:               SCTPasp_PT.hh
 //  Description:        SCTPasp test port header
-//  Rev:                R11A
 //  Prodnr:             CNL 113 469
 // 
 
@@ -68,9 +67,9 @@ public:
   void set_parameter(const char *parameter_name,
     const char *parameter_value);
 
-  void Event_Handler(const fd_set *read_fds,
-    const fd_set *write_fds, const fd_set *error_fds,
-    double time_since_last_call);
+  void Handle_Fd_Event_Error(int my_fd);
+  void Handle_Fd_Event_Writable(int my_fd);
+  void Handle_Fd_Event_Readable(int my_fd);
   
 protected:
   void user_map(const char *system_port);
@@ -112,13 +111,13 @@ private:
   void map_delete_item_fd(int fd); 
   void map_delete_item(int index);
 
-  void map_put_item_server(int fd, struct in_addr local_IP_address, unsigned short local_port);
+  void map_put_item_server(int fd, const CHARSTRING& local_IP_address, unsigned short local_port);
   int  map_get_item_server(int fd);
   void map_delete_item_fd_server(int fd); 
   void map_delete_item_server(int index);
   
-  void create_socket();
-  in_addr get_in_addr(const char *hostname);
+  int create_socket(int addr_family);
+  int fill_addr_struct(const char* name, int port, struct sockaddr_storage* sa, socklen_t& saLen);
   void setNonBlocking(int fd);
     
   boolean simple_mode;
@@ -127,8 +126,8 @@ private:
   boolean server_mode;
   boolean debug;
   int server_backlog;
-  struct in_addr local_IP_address;
-  struct in_addr peer_IP_address;
+  CHARSTRING local_IP_address;
+  CHARSTRING peer_IP_address;
   unsigned short local_port;
   unsigned short peer_port;
 
@@ -140,7 +139,7 @@ private:
   boolean peer_port_is_present;
 
   int fd;
-  fd_set readfds, writefds;
+
   int receiving_fd;
 
   struct fd_map_item;

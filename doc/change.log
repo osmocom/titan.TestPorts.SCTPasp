@@ -1,0 +1,9 @@
+= SCTPasp Test Port for TTCN-3 Toolset with TITAN, Change log
+:author: Gábor Szalai
+:toc: left
+
+== Changes
+
+=== R12A
+
+IPv6 support added
